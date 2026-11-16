@@ -111,6 +111,40 @@ static bool parse_content_length(StrView val, size_t *out) {
     return true;
 }
 
+static void parse_query_params(HttpRequest *req) {
+    if (!req->query.ptr || req->query.len == 0) {
+        return;
+    }
+
+    const char *p = req->query.ptr;
+    const char *end = req->query.ptr + req->query.len;
+
+    while (p < end && req->query_param_count < HTTP_MAX_QUERY_PARAMS) {
+        const char *amp = memchr(p, '&', (size_t)(end - p));
+        const char *pair_end = amp ? amp : end;
+
+        if (pair_end > p) {
+            const char *eq = memchr(p, '=', (size_t)(pair_end - p));
+            if (eq) {
+                req->query_params[req->query_param_count++] = (HttpParam){
+                    .key = {p, (size_t)(eq - p)},
+                    .value = {eq + 1, (size_t)(pair_end - (eq + 1))},
+                };
+            } else {
+                req->query_params[req->query_param_count++] = (HttpParam){
+                    .key = {p, (size_t)(pair_end - p)},
+                    .value = {NULL, 0},
+                };
+            }
+        }
+
+        if (!amp) {
+            break;
+        }
+        p = amp + 1;
+    }
+}
+
 StrView http_req_header(const HttpRequest *req, const char *name) {
     if (!req || !name) {
         return (StrView){NULL, 0};
@@ -130,6 +164,18 @@ StrView http_req_param(const HttpRequest *req, const char *key) {
     for (size_t i = 0; i < req->param_count; i++) {
         if (str_view_eq(req->params[i].key, key)) {
             return req->params[i].value;
+        }
+    }
+    return (StrView){NULL, 0};
+}
+
+StrView http_req_query(const HttpRequest *req, const char *key) {
+    if (!req || !key) {
+        return (StrView){NULL, 0};
+    }
+    for (size_t i = 0; i < req->query_param_count; i++) {
+        if (str_view_eq(req->query_params[i].key, key)) {
+            return req->query_params[i].value;
         }
     }
     return (StrView){NULL, 0};
@@ -171,6 +217,7 @@ HttpParseStatus http_parse_request(const char *buf, size_t len, HttpRequest *req
         req->path = (StrView){req->target.ptr, (size_t)(qmark - req->target.ptr)};
         req->query =
             (StrView){qmark + 1, req->target.len - (size_t)(qmark - req->target.ptr) - 1};
+        parse_query_params(req);
     } else {
         req->path = req->target;
         req->query = (StrView){NULL, 0};
@@ -262,6 +309,8 @@ static const char *status_reason(int code) {
             return "No Content";
         case 400:
             return "Bad Request";
+        case 403:
+            return "Forbidden";
         case 404:
             return "Not Found";
         case 405:

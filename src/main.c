@@ -20,9 +20,11 @@ static void handle_health(const HttpRequest *req, HttpResponse *res, void *user_
 static void handle_get_user(const HttpRequest *req, HttpResponse *res, void *user_data) {
     (void)user_data;
     StrView id = http_req_param(req, "id");
+    StrView role = http_req_query(req, "role");
 
     char body[256];
-    int n = snprintf(body, sizeof(body), "{\"user_id\":\"%.*s\"}\n", (int)id.len, id.ptr);
+    int n = snprintf(body, sizeof(body), "{\"user_id\":\"%.*s\",\"role\":\"%.*s\"}\n",
+                     (int)id.len, id.ptr, (int)role.len, role.ptr);
     if (n < 0 || (size_t)n >= sizeof(body)) {
         http_res_json(res, 500, "{\"error\":\"internal error\"}\n");
         return;

@@ -5,8 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define HTTP_MAX_HEADERS 32
-#define HTTP_MAX_PARAMS  16
+#define HTTP_MAX_HEADERS      32
+#define HTTP_MAX_PARAMS       16
+#define HTTP_MAX_QUERY_PARAMS 32
 
 typedef struct {
     const char *ptr;
@@ -54,6 +55,9 @@ typedef struct {
     HttpParam params[HTTP_MAX_PARAMS];
     size_t param_count;
 
+    HttpParam query_params[HTTP_MAX_QUERY_PARAMS];
+    size_t query_param_count;
+
     StrView body;
     size_t raw_len;
     bool keep_alive;
@@ -77,6 +81,7 @@ HttpParseStatus http_parse_request(const char *buf, size_t len, HttpRequest *req
 
 StrView http_req_header(const HttpRequest *req, const char *name);
 StrView http_req_param(const HttpRequest *req, const char *key);
+StrView http_req_query(const HttpRequest *req, const char *key);
 
 void http_res_init(HttpResponse *res, char *buf, size_t cap, bool keep_alive);
 void http_res_status(HttpResponse *res, int status_code);
