@@ -3,7 +3,6 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -14,6 +13,7 @@
 #define MAX_EPOLL_EVENTS 128
 
 static void conn_close(Connection *conn);
+static void conn_handle_read(Connection *conn);
 
 static void on_conn_timeout(void *user_data) {
     Connection *conn = (Connection *)user_data;
@@ -130,30 +130,30 @@ static void accept_pending(Server *srv) {
     }
 }
 
-static void build_default_response(Connection *conn) {
-    static const char body[] = "{\"status\":\"ok\",\"server\":\"ahsd\"}\n";
-    int n = snprintf(conn->write_buf, sizeof(conn->write_buf),
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: application/json\r\n"
-                     "Content-Length: %zu\r\n"
-                     "Connection: close\r\n"
-                     "\r\n"
-                     "%s",
-                     sizeof(body) - 1, body);
-
-    if (n < 0 || (size_t)n >= sizeof(conn->write_buf)) {
-        conn_close(conn);
-        return;
-    }
-
-    conn->write_len = (size_t)n;
+static void conn_start_writing(Connection *conn, size_t len, bool keep_alive) {
+    conn->write_len = len;
     conn->write_offset = 0;
+    conn->keep_alive = keep_alive;
     conn->state = CONN_STATE_WRITING;
 
     timer_heap_upsert(&conn->server->timer_heap, &conn->timer,
                       conn->server->config.write_timeout_ms);
 
     if (!epoll_set_events(conn->server->epoll_fd, conn->fd, EPOLLOUT | EPOLLET | EPOLLRDHUP,
+                          conn)) {
+        conn_close(conn);
+    }
+}
+
+static void conn_reset_for_next_request(Connection *conn) {
+    conn->write_len = 0;
+    conn->write_offset = 0;
+    conn->state = CONN_STATE_READING;
+
+    timer_heap_upsert(&conn->server->timer_heap, &conn->timer,
+                      conn->server->config.read_timeout_ms);
+
+    if (!epoll_set_events(conn->server->epoll_fd, conn->fd, EPOLLIN | EPOLLET | EPOLLRDHUP,
                           conn)) {
         conn_close(conn);
     }
@@ -177,30 +177,75 @@ static void conn_handle_write(Connection *conn) {
         return;
     }
 
-    conn_close(conn);
+    if (!conn->keep_alive) {
+        conn_close(conn);
+        return;
+    }
+
+    conn_reset_for_next_request(conn);
+    if (conn->read_len > 0) {
+        conn_handle_read(conn);
+    }
+}
+
+static void conn_process_request(Connection *conn, HttpRequest *req) {
+    HttpResponse res;
+    http_res_init(&res, conn->write_buf, sizeof(conn->write_buf), req->keep_alive);
+
+    router_dispatch(&conn->server->router, req, &res);
+
+    if (!res.headers_written) {
+        http_res_json(&res, 204, NULL);
+    }
+
+    size_t remaining = conn->read_len - req->raw_len;
+    if (remaining > 0) {
+        memmove(conn->read_buf, conn->read_buf + req->raw_len, remaining);
+    }
+    conn->read_len = remaining;
+
+    conn_start_writing(conn, res.len, req->keep_alive);
+    if (conn->state == CONN_STATE_WRITING) {
+        conn_handle_write(conn);
+    }
 }
 
 static void conn_handle_read(Connection *conn) {
     for (;;) {
-        size_t space = sizeof(conn->read_buf) - conn->read_len - 1;
+        if (conn->read_len > 0) {
+            HttpRequest req;
+            HttpParseStatus status = http_parse_request(conn->read_buf, conn->read_len, &req);
+            if (status == HTTP_PARSE_OK) {
+                conn_process_request(conn, &req);
+                return;
+            }
+            if (status == HTTP_PARSE_ERROR) {
+                HttpResponse res;
+                http_res_init(&res, conn->write_buf, sizeof(conn->write_buf), false);
+                http_res_json(&res, 400, "{\"error\":\"bad request\"}\n");
+                conn_start_writing(conn, res.len, false);
+                if (conn->state == CONN_STATE_WRITING) {
+                    conn_handle_write(conn);
+                }
+                return;
+            }
+        }
+
+        size_t space = sizeof(conn->read_buf) - conn->read_len;
         if (space == 0) {
-            LOG_WARN("Read buffer full on fd=%d", conn->fd);
-            conn_close(conn);
+            HttpResponse res;
+            http_res_init(&res, conn->write_buf, sizeof(conn->write_buf), false);
+            http_res_json(&res, 413, "{\"error\":\"payload too large\"}\n");
+            conn_start_writing(conn, res.len, false);
+            if (conn->state == CONN_STATE_WRITING) {
+                conn_handle_write(conn);
+            }
             return;
         }
 
         ssize_t n = recv(conn->fd, conn->read_buf + conn->read_len, space, 0);
         if (n > 0) {
             conn->read_len += (size_t)n;
-            conn->read_buf[conn->read_len] = '\0';
-
-            if (strstr(conn->read_buf, "\r\n\r\n") != NULL) {
-                build_default_response(conn);
-                if (conn->state == CONN_STATE_WRITING) {
-                    conn_handle_write(conn);
-                }
-                return;
-            }
             continue;
         }
         if (n == 0) {
@@ -230,6 +275,8 @@ bool server_init(Server *srv, const ServerConfig *config) {
     srv->config = *config;
     srv->listen_fd = -1;
     srv->epoll_fd = -1;
+
+    router_init(&srv->router);
 
     if (!mem_pool_init(&srv->conn_pool, sizeof(Connection), config->max_connections)) {
         LOG_ERROR("Failed to initialize connection pool");
@@ -267,6 +314,14 @@ bool server_init(Server *srv, const ServerConfig *config) {
     }
 
     return true;
+}
+
+bool server_route(Server *srv, HttpMethod method, const char *pattern, RouteHandler handler,
+                  void *user_data) {
+    if (!srv) {
+        return false;
+    }
+    return router_add(&srv->router, method, pattern, handler, user_data);
 }
 
 void server_run(Server *srv) {

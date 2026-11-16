@@ -6,10 +6,11 @@
 #include <stdint.h>
 
 #include "mem_pool.h"
+#include "router.h"
 #include "timer_heap.h"
 
-#define AHSD_READ_BUF_SIZE  4096
-#define AHSD_WRITE_BUF_SIZE 4096
+#define AHSD_READ_BUF_SIZE  8192
+#define AHSD_WRITE_BUF_SIZE 16384
 
 typedef enum {
     CONN_STATE_READING = 0,
@@ -24,6 +25,7 @@ typedef struct {
     ConnState state;
     Server *server;
     TimerNode timer;
+    bool keep_alive;
 
     char read_buf[AHSD_READ_BUF_SIZE];
     size_t read_len;
@@ -48,9 +50,12 @@ struct Server {
 
     MemPool conn_pool;
     TimerHeap timer_heap;
+    Router router;
 };
 
 bool server_init(Server *srv, const ServerConfig *config);
+bool server_route(Server *srv, HttpMethod method, const char *pattern, RouteHandler handler,
+                  void *user_data);
 void server_run(Server *srv);
 void server_stop(Server *srv);
 void server_destroy(Server *srv);
