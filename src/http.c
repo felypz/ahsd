@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 StrView str_view_from_cstr(const char *s) {
     if (!s) {
@@ -331,6 +332,8 @@ void http_res_init(HttpResponse *res, char *buf, size_t cap, bool keep_alive) {
     res->len = 0;
     res->headers_written = false;
     res->keep_alive = keep_alive;
+    res->file_fd = -1;
+    res->file_size = 0;
 }
 
 void http_res_status(HttpResponse *res, int status_code) {
@@ -388,6 +391,42 @@ bool http_res_body(HttpResponse *res, const char *content_type, const void *data
     if (len > 0 && data) {
         memcpy(res->buf + res->len, data, len);
         res->len += len;
+    }
+    return true;
+}
+
+bool http_res_file(HttpResponse *res, int file_fd, size_t file_size, const char *content_type,
+                   bool headers_only) {
+    if (file_fd < 0 || !res_ensure_status_line(res)) {
+        if (file_fd >= 0) {
+            close(file_fd);
+        }
+        return false;
+    }
+
+    if (content_type && !http_res_header(res, "Content-Type", content_type)) {
+        close(file_fd);
+        return false;
+    }
+
+    int n = snprintf(res->buf + res->len, res->cap - res->len,
+                     "Content-Length: %zu\r\n"
+                     "Connection: %s\r\n"
+                     "\r\n",
+                     file_size, res->keep_alive ? "keep-alive" : "close");
+    if (n < 0 || res->len + (size_t)n >= res->cap) {
+        close(file_fd);
+        return false;
+    }
+    res->len += (size_t)n;
+
+    if (headers_only || file_size == 0) {
+        close(file_fd);
+        res->file_fd = -1;
+        res->file_size = 0;
+    } else {
+        res->file_fd = file_fd;
+        res->file_size = file_size;
     }
     return true;
 }

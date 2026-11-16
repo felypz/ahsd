@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "mem_pool.h"
 #include "router.h"
@@ -33,6 +34,10 @@ typedef struct {
     char write_buf[AHSD_WRITE_BUF_SIZE];
     size_t write_len;
     size_t write_offset;
+
+    int file_fd;
+    off_t file_offset;
+    size_t file_size;
 } Connection;
 
 typedef struct {

@@ -70,6 +70,9 @@ typedef struct {
     size_t len;
     bool headers_written;
     bool keep_alive;
+
+    int file_fd;
+    size_t file_size;
 } HttpResponse;
 
 StrView str_view_from_cstr(const char *s);
@@ -87,6 +90,8 @@ void http_res_init(HttpResponse *res, char *buf, size_t cap, bool keep_alive);
 void http_res_status(HttpResponse *res, int status_code);
 bool http_res_header(HttpResponse *res, const char *name, const char *value);
 bool http_res_body(HttpResponse *res, const char *content_type, const void *data, size_t len);
+bool http_res_file(HttpResponse *res, int file_fd, size_t file_size, const char *content_type,
+                   bool headers_only);
 bool http_res_text(HttpResponse *res, int status_code, const char *text);
 bool http_res_json(HttpResponse *res, int status_code, const char *json);
 

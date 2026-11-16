@@ -5,6 +5,7 @@
 #include <netinet/tcp.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -38,6 +39,11 @@ static void conn_close(Connection *conn) {
     int fd = conn->fd;
     conn->fd = -1;
     conn->state = CONN_STATE_CLOSING;
+
+    if (conn->file_fd >= 0) {
+        close(conn->file_fd);
+        conn->file_fd = -1;
+    }
 
     timer_heap_remove(&srv->timer_heap, &conn->timer);
     epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
@@ -109,6 +115,7 @@ static void accept_pending(Server *srv) {
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         conn->fd = client_fd;
+        conn->file_fd = -1;
         conn->state = CONN_STATE_READING;
         conn->server = srv;
         timer_node_init(&conn->timer, on_conn_timeout, conn);
@@ -130,9 +137,13 @@ static void accept_pending(Server *srv) {
     }
 }
 
-static void conn_start_writing(Connection *conn, size_t len, bool keep_alive) {
+static void conn_start_writing(Connection *conn, size_t len, int file_fd, size_t file_size,
+                               bool keep_alive) {
     conn->write_len = len;
     conn->write_offset = 0;
+    conn->file_fd = file_fd;
+    conn->file_offset = 0;
+    conn->file_size = file_size;
     conn->keep_alive = keep_alive;
     conn->state = CONN_STATE_WRITING;
 
@@ -146,6 +157,12 @@ static void conn_start_writing(Connection *conn, size_t len, bool keep_alive) {
 }
 
 static void conn_reset_for_next_request(Connection *conn) {
+    if (conn->file_fd >= 0) {
+        close(conn->file_fd);
+        conn->file_fd = -1;
+    }
+    conn->file_offset = 0;
+    conn->file_size = 0;
     conn->write_len = 0;
     conn->write_offset = 0;
     conn->state = CONN_STATE_READING;
@@ -177,6 +194,27 @@ static void conn_handle_write(Connection *conn) {
         return;
     }
 
+    while (conn->file_fd >= 0 && (size_t)conn->file_offset < conn->file_size) {
+        size_t remaining = conn->file_size - (size_t)conn->file_offset;
+        ssize_t n = sendfile(conn->fd, conn->file_fd, &conn->file_offset, remaining);
+        if (n > 0) {
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        }
+        conn_close(conn);
+        return;
+    }
+
+    if (conn->file_fd >= 0) {
+        close(conn->file_fd);
+        conn->file_fd = -1;
+    }
+
     if (!conn->keep_alive) {
         conn_close(conn);
         return;
@@ -204,7 +242,7 @@ static void conn_process_request(Connection *conn, HttpRequest *req) {
     }
     conn->read_len = remaining;
 
-    conn_start_writing(conn, res.len, req->keep_alive);
+    conn_start_writing(conn, res.len, res.file_fd, res.file_size, req->keep_alive);
     if (conn->state == CONN_STATE_WRITING) {
         conn_handle_write(conn);
     }
@@ -223,7 +261,7 @@ static void conn_handle_read(Connection *conn) {
                 HttpResponse res;
                 http_res_init(&res, conn->write_buf, sizeof(conn->write_buf), false);
                 http_res_json(&res, 400, "{\"error\":\"bad request\"}\n");
-                conn_start_writing(conn, res.len, false);
+                conn_start_writing(conn, res.len, -1, 0, false);
                 if (conn->state == CONN_STATE_WRITING) {
                     conn_handle_write(conn);
                 }
@@ -236,7 +274,7 @@ static void conn_handle_read(Connection *conn) {
             HttpResponse res;
             http_res_init(&res, conn->write_buf, sizeof(conn->write_buf), false);
             http_res_json(&res, 413, "{\"error\":\"payload too large\"}\n");
-            conn_start_writing(conn, res.len, false);
+            conn_start_writing(conn, res.len, -1, 0, false);
             if (conn->state == CONN_STATE_WRITING) {
                 conn_handle_write(conn);
             }

@@ -1,15 +1,8 @@
-#include <signal.h>
 #include <stdio.h>
 
 #include "log.h"
-#include "server.h"
-
-static Server g_server;
-
-static void on_signal(int sig) {
-    (void)sig;
-    server_stop(&g_server);
-}
+#include "static_files.h"
+#include "worker.h"
 
 static void handle_health(const HttpRequest *req, HttpResponse *res, void *user_data) {
     (void)req;
@@ -39,36 +32,40 @@ static void handle_echo(const HttpRequest *req, HttpResponse *res, void *user_da
     http_res_body(res, "application/octet-stream", req->body.ptr, req->body.len);
 }
 
+static void setup_routes(Server *srv, void *user_data) {
+    (void)user_data;
+
+    static const StaticMount public_mount = {
+        .url_prefix = "/static",
+        .root_dir = "./public",
+    };
+
+    server_route(srv, HTTP_METHOD_GET, "/health", handle_health, NULL);
+    server_route(srv, HTTP_METHOD_GET, "/users/:id", handle_get_user, NULL);
+    server_route(srv, HTTP_METHOD_POST, "/echo", handle_echo, NULL);
+    server_mount_static(srv, &public_mount);
+}
+
 int main(void) {
-    log_init(LOG_LEVEL_DEBUG);
+    log_init(LOG_LEVEL_INFO);
 
-    struct sigaction sa = {
-        .sa_handler = on_signal,
-    };
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);
-
-    ServerConfig config = {
-        .port = 8080,
-        .max_connections = 4096,
-        .read_timeout_ms = 5000,
-        .write_timeout_ms = 5000,
+    MasterConfig config = {
+        .server_config =
+            {
+                .port = 8080,
+                .max_connections = 4096,
+                .read_timeout_ms = 5000,
+                .write_timeout_ms = 5000,
+            },
+        .worker_count = 0,
+        .setup_fn = setup_routes,
+        .user_data = NULL,
     };
 
-    if (!server_init(&g_server, &config)) {
-        LOG_ERROR("Failed to initialize server");
+    if (!master_run(&config)) {
+        LOG_ERROR("Failed to start master process");
         return 1;
     }
 
-    server_route(&g_server, HTTP_METHOD_GET, "/health", handle_health, NULL);
-    server_route(&g_server, HTTP_METHOD_GET, "/users/:id", handle_get_user, NULL);
-    server_route(&g_server, HTTP_METHOD_POST, "/echo", handle_echo, NULL);
-
-    server_run(&g_server);
-
-    LOG_INFO("Shutting down server");
-    server_destroy(&g_server);
     return 0;
 }
