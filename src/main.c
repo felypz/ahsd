@@ -1,5 +1,6 @@
 #include <stdio.h>
 
+#include "config.h"
 #include "log.h"
 #include "static_files.h"
 #include "worker.h"
@@ -33,36 +34,45 @@ static void handle_echo(const HttpRequest *req, HttpResponse *res, void *user_da
 }
 
 static void setup_routes(Server *srv, void *user_data) {
-    (void)user_data;
-
-    static const StaticMount public_mount = {
-        .url_prefix = "/static",
-        .root_dir = "./public",
-    };
+    const StaticMount *mount = (const StaticMount *)user_data;
 
     server_route(srv, HTTP_METHOD_GET, "/health", handle_health, NULL);
     server_route(srv, HTTP_METHOD_GET, "/users/:id", handle_get_user, NULL);
     server_route(srv, HTTP_METHOD_POST, "/echo", handle_echo, NULL);
-    server_mount_static(srv, &public_mount);
+    server_mount_static(srv, mount);
 }
 
-int main(void) {
-    log_init(LOG_LEVEL_INFO);
+int main(int argc, char **argv) {
+    AppConfig app_cfg;
+    ConfigParseResult parse_res = config_load(&app_cfg, argc, argv);
+    if (parse_res == CONFIG_PARSE_EXIT_OK) {
+        return 0;
+    }
+    if (parse_res == CONFIG_PARSE_ERROR) {
+        return 1;
+    }
 
-    MasterConfig config = {
-        .server_config =
-            {
-                .port = 8080,
-                .max_connections = 4096,
-                .read_timeout_ms = 5000,
-                .write_timeout_ms = 5000,
-            },
-        .worker_count = 0,
-        .setup_fn = setup_routes,
-        .user_data = NULL,
+    log_init(app_cfg.log_level);
+
+    StaticMount static_mount = {
+        .url_prefix = app_cfg.static_prefix,
+        .root_dir = app_cfg.www_root,
     };
 
-    if (!master_run(&config)) {
+    MasterConfig master_cfg = {
+        .server_config =
+            {
+                .port = app_cfg.port,
+                .max_connections = app_cfg.max_connections,
+                .read_timeout_ms = app_cfg.read_timeout_ms,
+                .write_timeout_ms = app_cfg.write_timeout_ms,
+            },
+        .worker_count = app_cfg.worker_count,
+        .setup_fn = setup_routes,
+        .user_data = &static_mount,
+    };
+
+    if (!master_run(&master_cfg)) {
         LOG_ERROR("Failed to start master process");
         return 1;
     }

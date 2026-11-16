@@ -2,5 +2,6 @@ build/
 public/
 
 ahsd
+ahsd-debug
 *.d
 *.o

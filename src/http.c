@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 StrView str_view_from_cstr(const char *s) {
@@ -325,6 +326,20 @@ static const char *status_reason(int code) {
     }
 }
 
+static const char *cached_http_date(void) {
+    static time_t last_sec = 0;
+    static char date_buf[32] = "Thu, 01 Jan 1970 00:00:00 GMT";
+
+    time_t now = time(NULL);
+    if (now != last_sec) {
+        struct tm gmt;
+        gmtime_r(&now, &gmt);
+        strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+        last_sec = now;
+    }
+    return date_buf;
+}
+
 void http_res_init(HttpResponse *res, char *buf, size_t cap, bool keep_alive) {
     res->status_code = 200;
     res->buf = buf;
@@ -344,8 +359,11 @@ static bool res_ensure_status_line(HttpResponse *res) {
     if (res->headers_written) {
         return true;
     }
-    int n = snprintf(res->buf, res->cap, "HTTP/1.1 %d %s\r\n", res->status_code,
-                     status_reason(res->status_code));
+    int n = snprintf(res->buf, res->cap,
+                     "HTTP/1.1 %d %s\r\n"
+                     "Server: ahsd\r\n"
+                     "Date: %s\r\n",
+                     res->status_code, status_reason(res->status_code), cached_http_date());
     if (n < 0 || (size_t)n >= res->cap) {
         return false;
     }

@@ -51,7 +51,8 @@ struct Server {
     ServerConfig config;
     int listen_fd;
     int epoll_fd;
-    bool running;
+    int wakeup_fd;
+    volatile bool running;
 
     MemPool conn_pool;
     TimerHeap timer_heap;
