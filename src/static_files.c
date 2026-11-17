@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -69,6 +70,22 @@ static bool has_path_traversal(StrView rel) {
     return false;
 }
 
+static bool is_within_root(const char *root_dir, const char *candidate_path) {
+    char real_root[PATH_MAX];
+    char real_target[PATH_MAX];
+
+    if (!realpath(root_dir, real_root) || !realpath(candidate_path, real_target)) {
+        return false;
+    }
+
+    size_t root_len = strlen(real_root);
+    if (strncmp(real_target, real_root, root_len) != 0) {
+        return false;
+    }
+
+    return real_target[root_len] == '\0' || real_target[root_len] == '/';
+}
+
 static void handle_static_request(const HttpRequest *req, HttpResponse *res, void *user_data) {
     const StaticMount *mount = (const StaticMount *)user_data;
     size_t prefix_len = strlen(mount->url_prefix);
@@ -104,7 +121,7 @@ static void handle_static_request(const HttpRequest *req, HttpResponse *res, voi
     }
 
     struct stat st;
-    if (stat(full_path, &st) < 0) {
+    if (lstat(full_path, &st) < 0) {
         if (errno == EACCES) {
             http_res_json(res, 403, "{\"error\":\"forbidden\"}\n");
         } else {
@@ -113,12 +130,21 @@ static void handle_static_request(const HttpRequest *req, HttpResponse *res, voi
         return;
     }
 
+    if (S_ISLNK(st.st_mode)) {
+        http_res_json(res, 403, "{\"error\":\"forbidden\"}\n");
+        return;
+    }
+
     if (S_ISDIR(st.st_mode)) {
         size_t cur_len = (size_t)n;
         int idx_n = snprintf(full_path + cur_len, sizeof(full_path) - cur_len, "/index.html");
         if (idx_n < 0 || cur_len + (size_t)idx_n >= sizeof(full_path) ||
-            stat(full_path, &st) < 0 || !S_ISREG(st.st_mode)) {
+            lstat(full_path, &st) < 0) {
             http_res_json(res, 404, "{\"error\":\"not found\"}\n");
+            return;
+        }
+        if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) {
+            http_res_json(res, 403, "{\"error\":\"forbidden\"}\n");
             return;
         }
     } else if (!S_ISREG(st.st_mode)) {
@@ -126,9 +152,18 @@ static void handle_static_request(const HttpRequest *req, HttpResponse *res, voi
         return;
     }
 
-    int fd = open(full_path, O_RDONLY | O_CLOEXEC);
+    if (!is_within_root(mount->root_dir, full_path)) {
+        http_res_json(res, 403, "{\"error\":\"forbidden\"}\n");
+        return;
+    }
+
+    int fd = open(full_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
-        http_res_json(res, 404, "{\"error\":\"not found\"}\n");
+        if (errno == ELOOP || errno == EACCES) {
+            http_res_json(res, 403, "{\"error\":\"forbidden\"}\n");
+        } else {
+            http_res_json(res, 404, "{\"error\":\"not found\"}\n");
+        }
         return;
     }
 
